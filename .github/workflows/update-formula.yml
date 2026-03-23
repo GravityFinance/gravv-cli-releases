@@ -1,0 +1,106 @@
+name: Update Homebrew Formula
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  update-formula:
+    name: Update Formula from S3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new version
+        id: check
+        run: |
+          # Get latest version from S3
+          LATEST=$(curl -fsSL https://gravv-cli.s3.us-east-1.amazonaws.com/releases/latest/version.txt | tr -d '[:space:]')
+          
+          # Get current version from Formula
+          CURRENT=$(grep 'version "' Formula/gravv.rb | head -1 | sed 's/.*version "\(.*\)"/\1/')
+          
+          echo "Latest version on S3: $LATEST"
+          echo "Current version in Formula: $CURRENT"
+          
+          if [ "$LATEST" != "$CURRENT" ] && [ -n "$LATEST" ]; then
+            echo "UPDATE_NEEDED=true" >> $GITHUB_OUTPUT
+            echo "VERSION=$LATEST" >> $GITHUB_OUTPUT
+          else
+            echo "UPDATE_NEEDED=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch checksums and update Formula
+        if: steps.check.outputs.UPDATE_NEEDED == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.VERSION }}
+        run: |
+          # Download checksums
+          curl -fsSL "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/checksums.txt" -o checksums.txt
+          
+          # Extract checksums
+          DARWIN_AMD64_SHA=$(grep "darwin_amd64.tar.gz" checksums.txt | awk '{print $1}')
+          DARWIN_ARM64_SHA=$(grep "darwin_arm64.tar.gz" checksums.txt | awk '{print $1}')
+          LINUX_AMD64_SHA=$(grep "linux_amd64.tar.gz" checksums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep "linux_arm64.tar.gz" checksums.txt | awk '{print $1}')
+          
+          # Generate new Formula
+          cat > Formula/gravv.rb << EOF
+          # typed: false
+          # frozen_string_literal: true
+
+          # This formula is auto-updated from S3 releases.
+          # Do not edit manually - changes will be overwritten.
+          class Gravv < Formula
+            desc "CLI/TUI tool for the Gravv financial payments platform"
+            homepage "https://github.com/GravityFinance/gravv-cli-releases"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_darwin_amd64.tar.gz"
+                sha256 "${DARWIN_AMD64_SHA}"
+              end
+              on_arm do
+                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_darwin_arm64.tar.gz"
+                sha256 "${DARWIN_ARM64_SHA}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_linux_amd64.tar.gz"
+                sha256 "${LINUX_AMD64_SHA}"
+              end
+              on_arm do
+                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_linux_arm64.tar.gz"
+                sha256 "${LINUX_ARM64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "gravv"
+              generate_completions_from_executable(bin/"gravv", "completion")
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/gravv version")
+            end
+          end
+          EOF
+          
+          echo "Formula updated to version ${VERSION}"
+
+      - name: Commit and push
+        if: steps.check.outputs.UPDATE_NEEDED == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.VERSION }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/gravv.rb
+          git commit -m "Update gravv to ${VERSION}"
+          git push
