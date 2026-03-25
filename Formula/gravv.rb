@@ -6,28 +6,28 @@
 class Gravv < Formula
   desc "CLI/TUI tool for the Gravv financial payments platform"
   homepage "https://github.com/GravityFinance/gravv-cli-releases"
-  version "0.1.8"
+  version "0.1.9"
   license "MIT"
 
   on_macos do
     on_intel do
-      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.8/gravv_0.1.8_darwin_amd64.tar.gz"
-      sha256 "6127f1b870e0f201b64c08ad20fc87f4df1e4339b4b2669a2e86bd684dba7fb1"
+      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_darwin_amd64.tar.gz"
+      sha256 "9e7ad232a9874efd39554d0e7ff86bc2e2026ba6192deac845517ac024521ea3"
     end
     on_arm do
-      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.8/gravv_0.1.8_darwin_arm64.tar.gz"
-      sha256 "5b11c178a0ccd3a2eeb7072abceb40581b061a4fb2539ecdb5e7dcff4ac563a7"
+      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_darwin_arm64.tar.gz"
+      sha256 "eadee120b0e1425ba0c46b9978b5a82fc856b33573e0337ce3e8cd2aca632ea3"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.8/gravv_0.1.8_linux_amd64.tar.gz"
-      sha256 "928a1cbba224ffcf0f024fdf06ea3dfd8ebc6a06b9b59efa2976dcc06d65bea1"
+      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_linux_amd64.tar.gz"
+      sha256 "b57ae2eab23fdd6cb1e63ba843b06f37a6b4ce6767bbb3b75ef07643f8ca0ae7"
     end
     on_arm do
-      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.8/gravv_0.1.8_linux_arm64.tar.gz"
-      sha256 "b041a55f575a40e2b7ab5b45140f660e093a864c535130e0fa927b9f6801f510"
+      url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_linux_arm64.tar.gz"
+      sha256 "5e4da4bdbcd2f8e8cc67544f79c99f7a11931d4b0faf22cf6a09bbb88ecea6be"
     end
   end
 
