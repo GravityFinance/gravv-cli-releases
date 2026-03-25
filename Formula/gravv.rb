@@ -12,22 +12,22 @@ class Gravv < Formula
   on_macos do
     on_intel do
       url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_darwin_amd64.tar.gz"
-      sha256 "9e7ad232a9874efd39554d0e7ff86bc2e2026ba6192deac845517ac024521ea3"
+      sha256 "d3da48b92d1641ee2ce7fd24e655b2d319ecab74b4d030646067e11f242411de"
     end
     on_arm do
       url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_darwin_arm64.tar.gz"
-      sha256 "eadee120b0e1425ba0c46b9978b5a82fc856b33573e0337ce3e8cd2aca632ea3"
+      sha256 "6700480a3a8bf311e6fefbfff10b45b4a96dac6e4819662246cd11c2e1fe6088"
     end
   end
 
   on_linux do
     on_intel do
       url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_linux_amd64.tar.gz"
-      sha256 "b57ae2eab23fdd6cb1e63ba843b06f37a6b4ce6767bbb3b75ef07643f8ca0ae7"
+      sha256 "c3d5740c48055b8c333561ca43fb710b57d2469fb5df92df33647043ff98240a"
     end
     on_arm do
       url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v0.1.9/gravv_0.1.9_linux_arm64.tar.gz"
-      sha256 "5e4da4bdbcd2f8e8cc67544f79c99f7a11931d4b0faf22cf6a09bbb88ecea6be"
+      sha256 "c59c451d5dffe47fac7d968ffad7483c87fd377f501528631a32f233849473e5"
     end
   end
 
