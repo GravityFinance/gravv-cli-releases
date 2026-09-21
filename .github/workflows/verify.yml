@@ -1,0 +1,142 @@
+name: Verify install paths
+
+# Both supported install paths are exercised against the real published
+# artifacts. Each has silently broken before: install.sh pointed at a releases
+# API that returns 404, and the formula carried hashes that no artifact
+# matched, so `brew install` failed everywhere but Apple Silicon.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  shell-syntax:
+    name: install.sh is POSIX sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # install.sh is piped into `sh`, so the shebang is ignored and bash-only
+      # syntax would break every user. dash is /bin/sh on Debian and Ubuntu.
+      - name: Parse with dash, bash and busybox ash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dash busybox
+          dash -n install.sh
+          bash -n install.sh
+          busybox sh -n install.sh
+
+      - name: Reject bash-only constructs
+        run: |
+          status=0
+          check() {
+            if grep -nE "$1" install.sh; then
+              echo "::error file=install.sh::$2"
+              status=1
+            fi
+          }
+          check 'set .*-o pipefail'        'set -o pipefail is not supported by dash'
+          check 'echo +-e'                 'echo -e is not portable; use printf'
+          check '\[\['                     '[[ ]] is a bash builtin; use [ ]'
+          check '&>'                       '&> is a bash redirect; use >/dev/null 2>&1'
+          check '^\s*function\s+\w+'       'the function keyword is not POSIX'
+          exit $status
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          additional_files: install.sh
+          check_together: "yes"
+        env:
+          SHELLCHECK_OPTS: -s sh
+
+  formula-hashes:
+    name: Formula hashes match published artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare every formula hash against the real artifact
+        run: |
+          python3 - <<'PY'
+          import hashlib, re, sys, urllib.request, pathlib
+
+          formula = pathlib.Path("Formula/gravv.rb").read_text()
+          pairs = re.findall(r'url\s+"([^"]+)"\s*\n\s*sha256\s+"([^"]+)"', formula)
+          if len(pairs) != 4:
+              sys.exit(f"expected 4 url/sha256 pairs in the formula, found {len(pairs)}")
+
+          failures = []
+          for url, expected in pairs:
+              with urllib.request.urlopen(url) as response:
+                  actual = hashlib.sha256(response.read()).hexdigest()
+              name = url.rsplit("/", 1)[-1]
+              if actual != expected:
+                  failures.append(f"{name}\n  formula: {expected}\n  actual:  {actual}")
+                  print(f"::error file=Formula/gravv.rb::{name} hash does not match the published artifact")
+              else:
+                  print(f"ok  {name}")
+
+          if failures:
+              sys.exit("formula hashes are wrong:\n" + "\n".join(failures))
+          PY
+
+  install-script:
+    name: install.sh installs a working binary
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Piped into sh, exactly as get.gravv.xyz serves it.
+      - name: Install via pipe to sh
+        run: cat install.sh | GRAVV_INSTALL_DIR="$HOME/.gravv/bin" sh
+
+      - name: The installed binary runs
+        run: |
+          "$HOME/.gravv/bin/gravv" version
+          "$HOME/.gravv/bin/gravv" --help >/dev/null
+
+      - name: A tampered checksum is refused
+        run: |
+          set -e
+          mkdir -p mirror/releases/v9.9.9 mirror/releases/latest
+          echo "9.9.9" > mirror/releases/latest/version.txt
+          # Any tarball will do; the point is that its hash will not match.
+          tar -czf "mirror/releases/v9.9.9/gravv_9.9.9_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" install.sh
+          printf '%s  %s\n' "$(printf '0%.0s' $(seq 64))" \
+            "gravv_9.9.9_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            > mirror/releases/v9.9.9/checksums.txt
+          (cd mirror && python3 -m http.server 8799 &) 
+          sleep 3
+          if cat install.sh | GRAVV_BASE_URL=http://localhost:8799 GRAVV_INSTALL_DIR="$HOME/.tampered" sh; then
+            echo "::error::installer accepted a tampered checksum"
+            exit 1
+          fi
+          if [ -f "$HOME/.tampered/gravv" ]; then
+            echo "::error::installer wrote a binary despite a checksum mismatch"
+            exit 1
+          fi
+          echo "tampered checksum correctly refused"
+
+  homebrew:
+    name: brew install from the tap
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the formula straight from this checkout
+        run: brew install --formula ./Formula/gravv.rb
+
+      - name: The installed binary runs
+        run: gravv version

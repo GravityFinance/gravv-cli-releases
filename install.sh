@@ -1,356 +1,314 @@
-#!/bin/bash
+#!/bin/sh
 #
 # gravv-cli installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/GravityFinance/gravv-cli-releases/main/install.sh | bash
+#
+#   curl -sSL https://get.gravv.xyz | sh
+#
+# This script is POSIX sh, not bash: it is piped straight into `sh`, so the
+# shebang above is ignored by the usual invocation and nothing here may rely
+# on bash features. Keep it that way -- `set -o pipefail`, `echo -e`, `[[ ]]`
+# and `&>` all fail under dash, which is /bin/sh on most Linux distributions.
+#
+# Everything is defined as functions and `main` is called on the very last
+# line, so a download truncated mid-flight cannot execute half an install.
 #
 # Environment variables:
-#   GRAVV_INSTALL_DIR - Installation directory (default: /usr/local/bin)
-#   GRAVV_VERSION     - Specific version to install (default: latest)
+#   GRAVV_VERSION       Version to install, with or without a leading v
+#                       (default: whatever the latest release is)
+#   GRAVV_INSTALL_DIR   Where to put the binary
+#                       (default: /usr/local/bin, falling back to
+#                       ~/.local/bin when that is not writable)
+#   GRAVV_BASE_URL      Release artifact host, for mirrors and testing
+#   GRAVV_NO_SUDO       Set to 1 to never escalate; installs to ~/.local/bin
+#   GRAVV_SKIP_VERIFY   Set to 1 to skip checksum verification (discouraged)
+#   NO_COLOR            Set to anything to disable coloured output
 #
 
-set -euo pipefail
+set -eu
 
-# Configuration
-GITHUB_OWNER="GravityFinance"
-GITHUB_REPO="gravv-cli-releases"
 BINARY_NAME="gravv"
-INSTALL_DIR="${GRAVV_INSTALL_DIR:-/usr/local/bin}"
+BASE_URL="${GRAVV_BASE_URL:-https://gravv-cli.s3.us-east-1.amazonaws.com}"
+FALLBACK_INSTALL_DIR="${HOME:-/tmp}/.local/bin"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# ---------------------------------------------------------------- output ---
 
-# Print functions
-info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+setup_colors() {
+    # Colour only when stdout is a terminal. Piping into `sh` leaves stdout
+    # attached to the terminal, so this stays colourful in the normal case
+    # while staying clean when redirected to a file or a log.
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        C_RED=$(printf '\033[0;31m')
+        C_GREEN=$(printf '\033[0;32m')
+        C_YELLOW=$(printf '\033[1;33m')
+        C_BLUE=$(printf '\033[0;34m')
+        C_CYAN=$(printf '\033[0;36m')
+        C_OFF=$(printf '\033[0m')
+    else
+        C_RED='' C_GREEN='' C_YELLOW='' C_BLUE='' C_CYAN='' C_OFF=''
+    fi
 }
 
-success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
+info()    { printf '%s[info]%s %s\n' "$C_BLUE" "$C_OFF" "$1"; }
+success() { printf '%s[ ok ]%s %s\n' "$C_GREEN" "$C_OFF" "$1"; }
+warn()    { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_OFF" "$1" >&2; }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+    printf '%s[fail]%s %s\n' "$C_RED" "$C_OFF" "$1" >&2
     exit 1
 }
 
-# Detect OS
+has() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------- platform -
+
 detect_os() {
-    local os
-    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
     case "$os" in
-        linux*)  echo "linux" ;;
-        darwin*) echo "darwin" ;;
+        linux*)               echo "linux" ;;
+        darwin*)              echo "darwin" ;;
         mingw*|msys*|cygwin*) echo "windows" ;;
-        *)       error "Unsupported operating system: $os" ;;
+        *)                    error "unsupported operating system: $os" ;;
     esac
 }
 
-# Detect architecture
 detect_arch() {
-    local arch
-    arch="$(uname -m)"
-    
+    arch=$(uname -m)
     case "$arch" in
         x86_64|amd64)  echo "amd64" ;;
         aarch64|arm64) echo "arm64" ;;
-        *)             error "Unsupported architecture: $arch" ;;
+        *)             error "unsupported architecture: $arch" ;;
     esac
 }
 
-# Get the latest release version from GitHub API
-get_latest_version() {
-    local api_url="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest"
-    local version
-    
-    if command -v curl &> /dev/null; then
-        version=$(curl -fsSL "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
-    elif command -v wget &> /dev/null; then
-        version=$(wget -qO- "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+# ---------------------------------------------------------------- transfer -
+
+# fetch_stdout URL -- prints the body, non-zero on failure.
+fetch_stdout() {
+    if has curl; then
+        curl -fsSL "$1"
+    elif has wget; then
+        wget -qO- "$1"
     else
-        error "Neither curl nor wget found. Please install one of them."
+        error "neither curl nor wget is available; install one and retry"
     fi
-    
-    if [ -z "$version" ]; then
-        error "Could not determine latest version. Please check your internet connection or specify GRAVV_VERSION."
-    fi
-    
-    # Remove 'v' prefix if present
-    echo "${version#v}"
 }
 
-# Download file
-download() {
-    local url="$1"
-    local output="$2"
-    
-    info "Downloading from $url..."
-    
-    if command -v curl &> /dev/null; then
-        if ! curl -fsSL "$url" -o "$output"; then
-            error "Failed to download $url"
-        fi
-    elif command -v wget &> /dev/null; then
-        if ! wget -q "$url" -O "$output"; then
-            error "Failed to download $url"
-        fi
+# fetch_file URL DEST
+fetch_file() {
+    if has curl; then
+        curl -fsSL "$1" -o "$2" || error "download failed: $1"
+    elif has wget; then
+        wget -q "$1" -O "$2" || error "download failed: $1"
     else
-        error "Neither curl nor wget found. Please install one of them."
+        error "neither curl nor wget is available; install one and retry"
     fi
 }
 
-# Verify checksum
-verify_checksum() {
-    local file="$1"
-    local checksums_file="$2"
-    local expected_name="$3"
-    
-    info "Verifying checksum..."
-    
-    local expected_checksum
-    expected_checksum=$(grep "$expected_name" "$checksums_file" 2>/dev/null | awk '{print $1}')
-    
-    if [ -z "$expected_checksum" ]; then
-        warn "Could not find checksum for $expected_name in checksums file"
-        return 0
-    fi
-    
-    local actual_checksum
-    if command -v sha256sum &> /dev/null; then
-        actual_checksum=$(sha256sum "$file" | awk '{print $1}')
-    elif command -v shasum &> /dev/null; then
-        actual_checksum=$(shasum -a 256 "$file" | awk '{print $1}')
-    else
-        warn "sha256sum/shasum not found, skipping checksum verification"
-        return 0
-    fi
-    
-    if [ "$expected_checksum" != "$actual_checksum" ]; then
-        error "Checksum verification failed!
-Expected: $expected_checksum
-Actual:   $actual_checksum"
-    fi
-    
-    success "Checksum verified"
-}
-
-# Install shell completions
-install_completions() {
-    local extract_dir="$1"
-    
-    # Check if completion files exist
-    local completions_dir="$extract_dir/scripts/completions"
-    if [ ! -d "$completions_dir" ]; then
-        completions_dir="$extract_dir/completions"
-    fi
-    
-    if [ ! -d "$completions_dir" ]; then
-        return 0
-    fi
-    
-    info "Installing shell completions..."
-    
-    # Bash completions
-    if [ -f "$completions_dir/gravv.bash" ]; then
-        local bash_dir="/etc/bash_completion.d"
-        if [ -d "$bash_dir" ] && [ -w "$bash_dir" ]; then
-            cp "$completions_dir/gravv.bash" "$bash_dir/gravv"
-            success "Bash completions installed"
-        elif [ -d "$bash_dir" ]; then
-            sudo cp "$completions_dir/gravv.bash" "$bash_dir/gravv" 2>/dev/null || true
-        fi
-    fi
-    
-    # Zsh completions
-    if [ -f "$completions_dir/gravv.zsh" ]; then
-        local zsh_dir="/usr/local/share/zsh/site-functions"
-        if [ -d "$zsh_dir" ] && [ -w "$zsh_dir" ]; then
-            cp "$completions_dir/gravv.zsh" "$zsh_dir/_gravv"
-            success "Zsh completions installed"
-        fi
-    fi
-    
-    # Fish completions
-    if [ -f "$completions_dir/gravv.fish" ]; then
-        local fish_dir="$HOME/.config/fish/completions"
-        if [ -d "$HOME/.config/fish" ]; then
-            mkdir -p "$fish_dir"
-            cp "$completions_dir/gravv.fish" "$fish_dir/gravv.fish"
-            success "Fish completions installed"
-        fi
-    fi
-}
-
-# Main installation function
-install_gravv() {
-    local os arch version archive_name archive_ext download_url checksums_url
-    
-    # Detect platform
-    os=$(detect_os)
-    arch=$(detect_arch)
-    
-    info "Detected platform: ${CYAN}$os/$arch${NC}"
-    
-    # Check for unsupported combinations
-    if [ "$os" = "windows" ] && [ "$arch" = "arm64" ]; then
-        error "Windows ARM64 is not supported"
-    fi
-    
-    # Get version
+resolve_version() {
     if [ -n "${GRAVV_VERSION:-}" ]; then
-        version="${GRAVV_VERSION#v}"  # Remove v prefix if present
-        info "Installing specified version: ${CYAN}$version${NC}"
+        # Accept both "0.1.9" and "v0.1.9".
+        printf '%s\n' "${GRAVV_VERSION#v}"
+        return 0
+    fi
+
+    version=$(fetch_stdout "$BASE_URL/releases/latest/version.txt" 2>/dev/null | tr -d ' \t\r\n') || version=''
+    if [ -z "$version" ]; then
+        error "could not determine the latest version from $BASE_URL; set GRAVV_VERSION to install a specific one"
+    fi
+    printf '%s\n' "${version#v}"
+}
+
+# ---------------------------------------------------------------- checksum -
+
+sha256_of() {
+    if has sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif has shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif has openssl; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
     else
-        info "Fetching latest version..."
-        version=$(get_latest_version)
-        info "Latest version: ${CYAN}$version${NC}"
-    fi
-    
-    # Determine archive format
-    if [ "$os" = "windows" ]; then
-        archive_ext="zip"
-    else
-        archive_ext="tar.gz"
-    fi
-    
-    # Build archive name (matches GoReleaser naming)
-    archive_name="gravv_${version}_${os}_${arch}.${archive_ext}"
-    
-    # Build download URLs
-    download_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}/${archive_name}"
-    checksums_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}/checksums.txt"
-    
-    # Create temporary directory
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap "rm -rf $tmp_dir" EXIT
-    
-    # Download archive and checksums
-    local archive_path="$tmp_dir/$archive_name"
-    local checksums_path="$tmp_dir/checksums.txt"
-    
-    download "$download_url" "$archive_path"
-    download "$checksums_url" "$checksums_path"
-    
-    # Verify checksum
-    verify_checksum "$archive_path" "$checksums_path" "$archive_name"
-    
-    # Extract archive
-    info "Extracting archive..."
-    local extract_dir="$tmp_dir/extracted"
-    mkdir -p "$extract_dir"
-    
-    if [ "$archive_ext" = "zip" ]; then
-        if command -v unzip &> /dev/null; then
-            unzip -q "$archive_path" -d "$extract_dir"
-        else
-            error "unzip not found. Please install unzip."
-        fi
-    else
-        tar -xzf "$archive_path" -C "$extract_dir"
-    fi
-    
-    # Find the binary
-    local binary_path
-    binary_path=$(find "$extract_dir" -name "$BINARY_NAME" -type f -perm -111 2>/dev/null | head -1)
-    
-    if [ -z "$binary_path" ]; then
-        # Try without executable permission check
-        binary_path=$(find "$extract_dir" -name "$BINARY_NAME" -type f | head -1)
-    fi
-    
-    if [ -z "$binary_path" ]; then
-        # Try with .exe extension for Windows
-        binary_path=$(find "$extract_dir" -name "${BINARY_NAME}.exe" -type f | head -1)
-    fi
-    
-    if [ -z "$binary_path" ]; then
-        error "Could not find $BINARY_NAME binary in archive"
-    fi
-    
-    # Create install directory if it doesn't exist
-    if [ ! -d "$INSTALL_DIR" ]; then
-        info "Creating install directory: $INSTALL_DIR"
-        if [ -w "$(dirname "$INSTALL_DIR")" ]; then
-            mkdir -p "$INSTALL_DIR"
-        else
-            sudo mkdir -p "$INSTALL_DIR"
-        fi
-    fi
-    
-    # Install binary
-    info "Installing to $INSTALL_DIR..."
-    
-    local target_path="$INSTALL_DIR/$BINARY_NAME"
-    if [ "$os" = "windows" ]; then
-        target_path="$INSTALL_DIR/${BINARY_NAME}.exe"
-    fi
-    
-    # Check if we need sudo
-    if [ -w "$INSTALL_DIR" ]; then
-        cp "$binary_path" "$target_path"
-        chmod +x "$target_path"
-    else
-        warn "Elevated permissions required to install to $INSTALL_DIR"
-        sudo cp "$binary_path" "$target_path"
-        sudo chmod +x "$target_path"
-    fi
-    
-    # Install completions
-    install_completions "$extract_dir"
-    
-    # Verify installation
-    echo ""
-    if command -v "$BINARY_NAME" &> /dev/null; then
-        success "gravv installed successfully!"
-        echo ""
-        "$BINARY_NAME" version
-        echo ""
-        echo -e "${CYAN}Quick Start:${NC}"
-        echo "  gravv login      - Authenticate with your API keys"
-        echo "  gravv tui        - Launch interactive terminal UI"
-        echo "  gravv --help     - Show all available commands"
-        echo ""
-        echo -e "${CYAN}Shell Completions:${NC}"
-        echo "  gravv completion bash > /etc/bash_completion.d/gravv"
-        echo "  gravv completion zsh > \"\${fpath[1]}/_gravv\""
-        echo "  gravv completion fish > ~/.config/fish/completions/gravv.fish"
-    else
-        warn "gravv was installed to $INSTALL_DIR but is not in your PATH"
-        echo ""
-        echo "Add to your PATH by running one of:"
-        echo ""
-        echo "  # Bash (~/.bashrc)"
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-        echo ""
-        echo "  # Zsh (~/.zshrc)"
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-        echo ""
-        echo "  # Fish (~/.config/fish/config.fish)"
-        echo "  set -gx PATH $INSTALL_DIR \$PATH"
+        return 1
     fi
 }
 
-# Run installation
+verify_checksum() {
+    archive_path=$1
+    checksums_path=$2
+    archive_file=$3
+
+    if [ "${GRAVV_SKIP_VERIFY:-}" = "1" ]; then
+        warn "skipping checksum verification because GRAVV_SKIP_VERIFY=1"
+        return 0
+    fi
+
+    expected=$(awk -v name="$archive_file" '$2 == name || $2 == "*" name {print $1}' "$checksums_path" | head -n 1)
+    if [ -z "$expected" ]; then
+        error "no checksum published for $archive_file; refusing to install an unverified binary (set GRAVV_SKIP_VERIFY=1 to override)"
+    fi
+
+    if ! actual=$(sha256_of "$archive_path"); then
+        error "no sha256 tool found (sha256sum, shasum or openssl); refusing to install an unverified binary (set GRAVV_SKIP_VERIFY=1 to override)"
+    fi
+
+    if [ "$expected" != "$actual" ]; then
+        error "checksum mismatch for $archive_file
+  expected: $expected
+  actual:   $actual
+The download may be corrupt or tampered with. Nothing was installed."
+    fi
+
+    success "checksum verified"
+}
+
+# ---------------------------------------------------------------- install --
+
+# Decide where the binary goes and whether sudo is needed. Sets
+# INSTALL_DIR and NEEDS_SUDO.
+choose_install_dir() {
+    NEEDS_SUDO=0
+
+    if [ -n "${GRAVV_INSTALL_DIR:-}" ]; then
+        INSTALL_DIR=$GRAVV_INSTALL_DIR
+    elif [ "${GRAVV_NO_SUDO:-}" = "1" ]; then
+        INSTALL_DIR=$FALLBACK_INSTALL_DIR
+    else
+        INSTALL_DIR=/usr/local/bin
+    fi
+
+    if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
+        return 0
+    fi
+
+    # Not writable. Escalating is only reasonable when the caller has not
+    # opted out and sudo actually exists; otherwise fall back to a directory
+    # inside the user's home, which needs no privileges at all.
+    if [ ! -d "$INSTALL_DIR" ]; then
+        parent=$(dirname "$INSTALL_DIR")
+        if [ -w "$parent" ]; then
+            mkdir -p "$INSTALL_DIR"
+            return 0
+        fi
+    fi
+
+    if [ "$(id -u)" = "0" ]; then
+        mkdir -p "$INSTALL_DIR"
+        return 0
+    fi
+
+    if [ "${GRAVV_NO_SUDO:-}" != "1" ] && has sudo; then
+        NEEDS_SUDO=1
+        return 0
+    fi
+
+    if [ -n "${GRAVV_INSTALL_DIR:-}" ]; then
+        error "$INSTALL_DIR is not writable and sudo is unavailable; pick a different GRAVV_INSTALL_DIR"
+    fi
+
+    warn "$INSTALL_DIR is not writable and sudo is unavailable; installing to $FALLBACK_INSTALL_DIR instead"
+    INSTALL_DIR=$FALLBACK_INSTALL_DIR
+    mkdir -p "$INSTALL_DIR"
+}
+
+place_binary() {
+    src=$1
+    dest=$2
+
+    if [ "$NEEDS_SUDO" = "1" ]; then
+        info "elevated permissions are required to write to $INSTALL_DIR"
+        sudo mkdir -p "$INSTALL_DIR" || error "could not create $INSTALL_DIR"
+        sudo cp "$src" "$dest" || error "could not install to $dest"
+        sudo chmod 755 "$dest" || error "could not make $dest executable"
+    else
+        cp "$src" "$dest" || error "could not install to $dest"
+        chmod 755 "$dest" || error "could not make $dest executable"
+    fi
+}
+
+on_path() {
+    case ":${PATH}:" in
+        *":$1:"*) return 0 ;;
+        *)        return 1 ;;
+    esac
+}
+
+print_next_steps() {
+    dest=$1
+
+    printf '\n'
+    success "gravv $VERSION installed to $dest"
+    printf '\n'
+
+    if on_path "$INSTALL_DIR"; then
+        "$dest" version 2>/dev/null || true
+        printf '\n'
+        printf '%sNext steps%s\n' "$C_CYAN" "$C_OFF"
+        printf '  gravv login     authenticate with your API key\n'
+        printf '  gravv tui       launch the interactive terminal UI\n'
+        printf '  gravv --help    list every command\n'
+    else
+        warn "$INSTALL_DIR is not on your PATH"
+        printf '\n'
+        printf 'Add it by appending this to your shell profile:\n\n'
+        printf '  export PATH="%s:$PATH"\n\n' "$INSTALL_DIR"
+        printf 'Or run gravv by its full path: %s\n' "$dest"
+    fi
+    printf '\n'
+}
+
+# -------------------------------------------------------------------- main -
+
+install_gravv() {
+    OS=$(detect_os)
+    ARCH=$(detect_arch)
+
+    if [ "$OS" = "windows" ]; then
+        error "this installer does not support Windows; download the .zip from the releases page or use WSL"
+    fi
+
+    info "platform: $C_CYAN$OS/$ARCH$C_OFF"
+
+    VERSION=$(resolve_version)
+    info "version:  $C_CYAN$VERSION$C_OFF"
+
+    archive_file="gravv_${VERSION}_${OS}_${ARCH}.tar.gz"
+    archive_url="$BASE_URL/releases/v${VERSION}/${archive_file}"
+    checksums_url="$BASE_URL/releases/v${VERSION}/checksums.txt"
+
+    tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t gravv)
+    [ -n "$tmp_dir" ] || error "could not create a temporary directory"
+    trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+    info "downloading $archive_file"
+    fetch_file "$archive_url" "$tmp_dir/$archive_file"
+    fetch_file "$checksums_url" "$tmp_dir/checksums.txt"
+
+    verify_checksum "$tmp_dir/$archive_file" "$tmp_dir/checksums.txt" "$archive_file"
+
+    mkdir -p "$tmp_dir/unpacked"
+    tar -xzf "$tmp_dir/$archive_file" -C "$tmp_dir/unpacked" \
+        || error "could not extract $archive_file"
+
+    binary_path=$(find "$tmp_dir/unpacked" -type f -name "$BINARY_NAME" | head -n 1)
+    [ -n "$binary_path" ] || error "no $BINARY_NAME binary inside $archive_file"
+
+    choose_install_dir
+    dest="$INSTALL_DIR/$BINARY_NAME"
+    place_binary "$binary_path" "$dest"
+
+    print_next_steps "$dest"
+}
+
 main() {
-    echo ""
-    echo -e "${CYAN}"
-    echo "  ╔═══════════════════════════════════════╗"
-    echo "  ║         gravv-cli installer           ║"
-    echo "  ╚═══════════════════════════════════════╝"
-    echo -e "${NC}"
-    
+    setup_colors
+
+    printf '\n'
+    printf '%s  gravv-cli installer%s\n' "$C_CYAN" "$C_OFF"
+    printf '\n'
+
     install_gravv
-    echo ""
 }
 
 main "$@"

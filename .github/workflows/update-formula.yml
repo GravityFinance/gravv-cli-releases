@@ -2,105 +2,44 @@ name: Update Homebrew Formula
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # Every 4 hours
-  workflow_dispatch:  # Manual trigger
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (defaults to the current release)"
+        required: false
+        type: string
+  # Lets the gravv-cli release workflow publish the formula the moment a
+  # release finishes, instead of waiting up to four hours for the schedule.
+  repository_dispatch:
+    types: [gravv-released]
+
+permissions:
+  contents: write
 
 jobs:
   update-formula:
-    name: Update Formula from S3
+    name: Regenerate formula from published checksums
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Check for new version
-        id: check
+      # The formula is regenerated unconditionally rather than only when the
+      # version changes. A version-gated update cannot repair a formula whose
+      # version is already current but whose hashes are wrong, which is how
+      # three of the four hashes stayed broken through several releases.
+      - name: Regenerate formula
+        run: ./scripts/update-formula.sh "${{ inputs.version || github.event.client_payload.version || '' }}"
+
+      - name: Commit if the formula changed
         run: |
-          # Get latest version from S3
-          LATEST=$(curl -fsSL https://gravv-cli.s3.us-east-1.amazonaws.com/releases/latest/version.txt | tr -d '[:space:]')
-          
-          # Get current version from Formula
-          CURRENT=$(grep 'version "' Formula/gravv.rb | head -1 | sed 's/.*version "\(.*\)"/\1/')
-          
-          echo "Latest version on S3: $LATEST"
-          echo "Current version in Formula: $CURRENT"
-          
-          if [ "$LATEST" != "$CURRENT" ] && [ -n "$LATEST" ]; then
-            echo "UPDATE_NEEDED=true" >> $GITHUB_OUTPUT
-            echo "VERSION=$LATEST" >> $GITHUB_OUTPUT
-          else
-            echo "UPDATE_NEEDED=false" >> $GITHUB_OUTPUT
+          if git diff --quiet -- Formula/gravv.rb; then
+            echo "Formula already matches the published checksums; nothing to do."
+            exit 0
           fi
-
-      - name: Fetch checksums and update Formula
-        if: steps.check.outputs.UPDATE_NEEDED == 'true'
-        env:
-          VERSION: ${{ steps.check.outputs.VERSION }}
-        run: |
-          # Download checksums
-          curl -fsSL "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/checksums.txt" -o checksums.txt
-          
-          # Extract checksums
-          DARWIN_AMD64_SHA=$(grep "darwin_amd64.tar.gz" checksums.txt | awk '{print $1}')
-          DARWIN_ARM64_SHA=$(grep "darwin_arm64.tar.gz" checksums.txt | awk '{print $1}')
-          LINUX_AMD64_SHA=$(grep "linux_amd64.tar.gz" checksums.txt | awk '{print $1}')
-          LINUX_ARM64_SHA=$(grep "linux_arm64.tar.gz" checksums.txt | awk '{print $1}')
-          
-          # Generate new Formula
-          cat > Formula/gravv.rb << EOF
-          # typed: false
-          # frozen_string_literal: true
-
-          # This formula is auto-updated from S3 releases.
-          # Do not edit manually - changes will be overwritten.
-          class Gravv < Formula
-            desc "CLI/TUI tool for the Gravv financial payments platform"
-            homepage "https://github.com/GravityFinance/gravv-cli-releases"
-            version "${VERSION}"
-            license "MIT"
-
-            on_macos do
-              on_intel do
-                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_darwin_amd64.tar.gz"
-                sha256 "${DARWIN_AMD64_SHA}"
-              end
-              on_arm do
-                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_darwin_arm64.tar.gz"
-                sha256 "${DARWIN_ARM64_SHA}"
-              end
-            end
-
-            on_linux do
-              on_intel do
-                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_linux_amd64.tar.gz"
-                sha256 "${LINUX_AMD64_SHA}"
-              end
-              on_arm do
-                url "https://gravv-cli.s3.us-east-1.amazonaws.com/releases/v${VERSION}/gravv_${VERSION}_linux_arm64.tar.gz"
-                sha256 "${LINUX_ARM64_SHA}"
-              end
-            end
-
-            def install
-              bin.install "gravv"
-              generate_completions_from_executable(bin/"gravv", "completion")
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/gravv version")
-            end
-          end
-          EOF
-          
-          echo "Formula updated to version ${VERSION}"
-
-      - name: Commit and push
-        if: steps.check.outputs.UPDATE_NEEDED == 'true'
-        env:
-          VERSION: ${{ steps.check.outputs.VERSION }}
-        run: |
+          version=$(grep -m1 'version "' Formula/gravv.rb | sed 's/.*version "\(.*\)"/\1/')
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/gravv.rb
-          git commit -m "Update gravv to ${VERSION}"
+          git commit -m "chore: regenerate formula for v${version}"
           git push
