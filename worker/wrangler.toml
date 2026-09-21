@@ -1,0 +1,9 @@
+name = "get-gravv-xyz"
+main = "index.js"
+compatibility_date = "2026-09-01"
+
+# Point this at the zone once get.gravv.xyz exists in Cloudflare DNS.
+# `custom_domain = true` makes Cloudflare create and manage the record.
+[[routes]]
+pattern = "get.gravv.xyz"
+custom_domain = true
